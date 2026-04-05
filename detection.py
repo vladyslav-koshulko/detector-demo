@@ -1,6 +1,7 @@
 import cv2
 import torch
 import time
+import json
 from rfdetr import RFDETRBase
 from ultralytics import YOLO
 import supervision as sv
@@ -8,72 +9,77 @@ import supervision as sv
 # 1. Ініціалізація моделей
 print("Завантаження моделей...")
 model_rf = RFDETRBase()
-model_yolo = YOLO("yolov8n.pt") # Найлегша версія для швидкості
+model_yolo = YOLO("yolov8n.pt")
 
-# 2. Налаштування анотаторів
+# Налаштування анотаторів
 box_annotator = sv.BoxAnnotator()
 label_annotator = sv.LabelAnnotator()
 
-# Список класів COCO (спільний для обох моделей)
-COCO_CLASSES = [
-    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
-    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
-    'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
-    'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
-    'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-    'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
-    'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
-    'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-    'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
-]
+# Статистика
+stats = {
+    "rf": {"times": [], "fps_list": []},
+    "yolo": {"times": [], "fps_list": []}
+}
+log_file = "fps_stats.log"
+start_minute = time.time()
 
-def process_frame(frame, detections, model_name, fps):
-    # Малюємо рамки
-    annotated = box_annotator.annotate(scene=frame.copy(), detections=detections)
+def save_stats(label, fps_data):
+    if not fps_data: return
+    avg_fps = sum(fps_data) / len(fps_data)
+    min_fps = min(fps_data)
+    max_fps = max(fps_data)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Створюємо підписи
-    labels = [
-        f"{COCO_CLASSES[class_id] if class_id < len(COCO_CLASSES) else class_id} {conf:.2f}"
-        for class_id, conf in zip(detections.class_id, detections.confidence)
-    ]
+    with open(log_file, "a") as f:
+        line = f"[{timestamp}] Model: {label} | Avg: {avg_fps:.2f} | Min: {min_fps:.2f} | Max: {max_fps:.2f}\n"
+        f.write(line)
+    print(f"Статистику збережено для {label}")
 
-    # Малюємо текст
-    annotated = label_annotator.annotate(scene=annotated, detections=detections, labels=labels)
-
-    # Вивід FPS
-    cv2.putText(annotated, f"{model_name} FPS: {fps:.1f}", (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    return annotated
-
-# 3. Запуск камери
+# 2. Запуск камери
 cap = cv2.VideoCapture(0)
-print("Запуск паралельної детекції. Натисніть 'q' для виходу.")
+print(f"Запис статистики активовано у файл: {log_file}")
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret: break
+try:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: break
 
-    # --- ТЕСТ RF-DETR ---
-    t1 = time.time()
-    with torch.no_grad():
-        det_rf = model_rf.predict(frame, threshold=0.5)
-    fps_rf = 1 / (time.time() - t1)
-    res_rf = process_frame(frame, det_rf, "RF-DETR (Transformer)", fps_rf)
+        current_time = time.time()
 
-    # --- ТЕСТ YOLOv8 ---
-    t2 = time.time()
-    results_yolo = model_yolo(frame, verbose=False)[0]
-    det_yolo = sv.Detections.from_ultralytics(results_yolo)
-    fps_yolo = 1 / (time.time() - t2)
-    res_yolo = process_frame(frame, det_yolo, "YOLOv8 (CNN)", fps_yolo)
+        # --- ТЕСТ RF-DETR ---
+        t_start = time.time()
+        with torch.no_grad():
+            _ = model_rf.predict(frame, threshold=0.5)
+        dt = time.time() - t_start
+        fps_rf = 1 / dt if dt > 0 else 0
+        stats["rf"]["fps_list"].append(fps_rf)
 
-    # 4. Відображення двох вікон
-    cv2.imshow("RF-DETR", res_rf)
-    cv2.imshow("YOLOv8", res_yolo)
+        # --- ТЕСТ YOLOv8 ---
+        t_start = time.time()
+        _ = model_yolo(frame, verbose=False)
+        dt = time.time() - t_start
+        fps_yolo = 1 / dt if dt > 0 else 0
+        stats["yolo"]["fps_list"].append(fps_yolo)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        # --- ЗАПИС СТАТИСТИКИ ЩОХВИЛИНИ ---
+        if current_time - start_minute >= 60:
+            save_stats("RF-DETR", stats["rf"]["fps_list"])
+            save_stats("YOLOv8", stats["yolo"]["fps_list"])
+            # Очищення для наступної хвилини
+            stats["rf"]["fps_list"] = []
+            stats["yolo"]["fps_list"] = []
+            start_minute = current_time
 
-cap.release()
-cv2.destroyAllWindows()
+        # Відображення (опціонально, для контролю)
+        cv2.putText(frame, f"RF FPS: {fps_rf:.1f} | YOLO FPS: {fps_yolo:.1f}", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.imshow("Benchmarks Running...", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+finally:
+    # Записати останні дані перед виходом
+    save_stats("RF-DETR (Final)", stats["rf"]["fps_list"])
+    save_stats("YOLOv8 (Final)", stats["yolo"]["fps_list"])
+    cap.release()
+    cv2.destroyAllWindows()
