@@ -1,6 +1,11 @@
-opencv-python
+opencv-python-headless
 torch
 torchvision
 numpy
 ultralytics
 supervision
+streamlit
+PySide6
+Pillow
+pyinstaller
+pandas
