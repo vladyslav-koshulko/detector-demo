@@ -8,11 +8,17 @@
 - **Model Manager (Web):** Завантаження моделей через URL або upload файлу.
 - **Per-slot Device Selection:** Вибір CPU/GPU для кожного слота та відображення активного пристрою в UI.
 - **Platform Streams:** Підтримка YouTube/платформ через yt-dlp з кешуванням resolved URL.
+- **Refresh URL Buttons:** Оновлення cached URL у web та desktop.
+- **Web Multi-Stream View:** Вибір N слотів для одночасного перегляду.
+- **Themes:** Світла/темна тема для web та desktop.
+- **Resizable Sidebar:** Сайдбар можна масштабувати/згортати в desktop.
 
 ### Виправлено
 - **Web Auth:** Відновлено дефолтні користувачі при порожньому `web_users_auth`.
 - **Desktop Grid UX:** Вікна камер створюються лише при активному стрімі.
 - **Device Mismatch:** Моделі примусово ініціалізуються на вибраному девайсі, з fallback на CPU.
+- **Stream Isolation:** Кожен слот використовує власний stream key (без дублювання потоку між вікнами).
+- **Slot Count Init:** Десктоп стартує з одним слотом без зайвих вікон.
 
 ---
 

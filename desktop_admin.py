@@ -71,19 +71,48 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         self.slot_device_choices = {}
         self.slot_device_labels = {}
         self.web_process = None
+        self._sidebar_collapsed = False
+        self._sidebar_prev_size = 420
+        self._ensure_single_slot()
         self._init_ui()
         self.timer = QTimer(); self.timer.timeout.connect(self._update_loop); self.timer.start(30)
 
+    def _ensure_single_slot(self):
+        slots = self.state.data.get("slot_configs", [])
+        if len(slots) <= 1:
+            return
+        if any(s.get("running") for s in slots):
+            return
+        slots = sorted(slots, key=lambda s: s.get("id", 0))
+        primary = slots[0]
+        primary["id"] = 0
+        self.state.data["slot_configs"] = [primary]
+        self.state.data["next_slot_id"] = 1
+        self.state.save()
+
     def _init_ui(self):
         main = QtWidgets.QWidget(); self.setCentralWidget(main); layout = QtWidgets.QHBoxLayout(main)
+        self.splitter = QtWidgets.QSplitter(Qt.Horizontal)
+        layout.addWidget(self.splitter)
         
         # Sidebar
-        scroll = QtWidgets.QScrollArea(); scroll.setFixedWidth(420); scroll.setWidgetResizable(True); layout.addWidget(scroll)
+        scroll = QtWidgets.QScrollArea(); scroll.setMinimumWidth(260); scroll.setWidgetResizable(True); self.splitter.addWidget(scroll)
         ctrl = QtWidgets.QWidget(); scroll.setWidget(ctrl); self.sidebar = QtWidgets.QVBoxLayout(ctrl)
 
         # Settings
         sg = QtWidgets.QGroupBox("🌐 System Control"); sl = QtWidgets.QVBoxLayout(sg)
         self.btn_web = QtWidgets.QPushButton("🚀 Start Web Server"); self.btn_web.clicked.connect(self.toggle_web); sl.addWidget(self.btn_web)
+        self.btn_toggle_sidebar = QtWidgets.QPushButton("⬅️ Collapse Sidebar")
+        self.btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
+        sl.addWidget(self.btn_toggle_sidebar)
+
+        theme_row = QtWidgets.QHBoxLayout()
+        theme_row.addWidget(QtWidgets.QLabel("Theme:"))
+        self.theme_toggle = QtWidgets.QComboBox()
+        self.theme_toggle.addItems(["Dark", "Light"])
+        self.theme_toggle.currentTextChanged.connect(self._apply_theme)
+        theme_row.addWidget(self.theme_toggle)
+        sl.addLayout(theme_row)
         
         gh = QtWidgets.QHBoxLayout(); gh.addWidget(QtWidgets.QLabel("Grid:")); self.spin = QtWidgets.QSpinBox(); self.spin.setRange(1,4); self.spin.setValue(self.state.data["grid_columns"]); self.spin.valueChanged.connect(self._grid_change); gh.addWidget(self.spin); sl.addLayout(gh)
         self.sidebar.addWidget(sg)
@@ -122,11 +151,15 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         self.sidebar.addStretch()
 
         # Matrix
-        self.grid_scroll = QtWidgets.QScrollArea(); self.grid_scroll.setWidgetResizable(True); self.grid_container = QtWidgets.QWidget(); self.grid_layout = QtWidgets.QGridLayout(self.grid_container); self.grid_scroll.setWidget(self.grid_container); layout.addWidget(self.grid_scroll)
+        self.grid_scroll = QtWidgets.QScrollArea(); self.grid_scroll.setWidgetResizable(True); self.grid_container = QtWidgets.QWidget(); self.grid_layout = QtWidgets.QGridLayout(self.grid_container); self.grid_scroll.setWidget(self.grid_container); self.splitter.addWidget(self.grid_scroll)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.grid_layout.setSpacing(6)
+        self.splitter.setSizes([420, 1180])
 
         self.widgets = {}
         for c in self.state.data["slot_configs"]: self._build_slot_ui(c["id"])
         self._rebuild_grid()
+        self._apply_theme(self.theme_toggle.currentText())
 
     def _add_url(self):
         t, ok = QtWidgets.QInputDialog.getText(self, "URL", "Enter RTSP/HTTP:"); 
@@ -174,6 +207,10 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         l.addWidget(dcb)
         device_label = QtWidgets.QLabel("Device: Auto")
         l.addWidget(device_label)
+
+        refresh_btn = QtWidgets.QPushButton("🔄 Refresh URL")
+        refresh_btn.clicked.connect(lambda _=False, sid=sid, scb=scb: self._refresh_stream_url(sid, scb))
+        l.addWidget(refresh_btn)
         
         btn = QtWidgets.QPushButton("🚀 Apply")
         btn.clicked.connect(lambda _=False, sid=sid, scb=scb, mcb=mcb, dcb=dcb, label=device_label: self._start_slot(sid, scb, mcb, dcb, label))
@@ -189,7 +226,7 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         device_choice = dcb.currentData() or "auto"
         self.slot_device_choices[sid] = device_choice
         self.state.update_slot(sid, {"src": src, "model": mcb.currentText(), "running": True})
-        self.streamer.start(src)
+        self.streamer.start(src, stream_key=str(sid))
         self.engines[sid] = DetectionEngine(
             model_path=None if "Mock" in mcb.currentText() else mcb.currentText(),
             device=device_choice
@@ -205,6 +242,7 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         for idx, sid in enumerate(sorted(active_ids)):
             if sid not in self.widgets:
                 self.widgets[sid] = VideoWidget(sid)
+            self.widgets[sid].setMinimumSize(320, 180)
             self.grid_layout.addWidget(self.widgets[sid], idx // cols, idx % cols)
 
     def _grid_change(self, v): self.state.data["grid_columns"] = v; self._rebuild_grid()
@@ -213,11 +251,24 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         if not self.web_process: self.web_process = subprocess.Popen(["streamlit", "run", "app.py"]); self.btn_web.setText("Stop Web")
         else: self.web_process.terminate(); self.web_process = None; self.btn_web.setText("Start Web")
 
+    def _toggle_sidebar(self):
+        if self._sidebar_collapsed:
+            self.splitter.setSizes([self._sidebar_prev_size, max(400, self.width() - self._sidebar_prev_size)])
+            self.btn_toggle_sidebar.setText("⬅️ Collapse Sidebar")
+            self._sidebar_collapsed = False
+        else:
+            sizes = self.splitter.sizes()
+            if sizes and sizes[0] > 0:
+                self._sidebar_prev_size = sizes[0]
+            self.splitter.setSizes([0, max(400, self.width())])
+            self.btn_toggle_sidebar.setText("➡️ Expand Sidebar")
+            self._sidebar_collapsed = True
+
     def _update_loop(self):
         for sid, w in self.widgets.items():
             cfg = next((s for s in self.state.data["slot_configs"] if s["id"] == sid), None)
             if cfg and cfg["running"]:
-                f = self.streamer.get_frame(cfg["src"])
+                f = self.streamer.get_frame(str(sid))
                 if f is not None:
                     if sid not in self.engines:
                         device_choice = self.slot_device_choices.get(sid, "auto")
@@ -230,6 +281,27 @@ class VisionAdminApp(QtWidgets.QMainWindow):
                             label.setText(f"Device: {self.engines[sid].device_label}")
                     p, _ = self.engines[sid].process_frame(f, night_mode=cfg["night_mode"], quality=cfg["quality"], zoom=cfg["zoom"])
                     w.update_frame(cv2.cvtColor(p, cv2.COLOR_BGR2RGB))
+
+    def _refresh_stream_url(self, sid, scb):
+        src = scb.currentText()
+        self.streamer.refresh_stream_url(src, restart=True)
+        QtWidgets.QMessageBox.information(self, "Refreshed", "URL cache refreshed")
+
+    def _apply_theme(self, theme_name):
+        if theme_name == "Light":
+            self.setStyleSheet(""
+                "QWidget { background-color: #f4f4f4; color: #111; }"
+                "QGroupBox { border: 1px solid #bbb; margin-top: 6px; }"
+                "QPushButton { background: #e6e6e6; padding: 6px; border-radius: 4px; }"
+                "QLabel { color: #111; }"
+            )
+        else:
+            self.setStyleSheet(""
+                "QWidget { background-color: #1a1a1a; color: #eee; }"
+                "QGroupBox { border: 1px solid #333; margin-top: 6px; }"
+                "QPushButton { background: #333; padding: 6px; border-radius: 4px; }"
+                "QLabel { color: #eee; }"
+            )
 
     def _run_batch_folder(self):
         folder = self.folder_path_label.text().strip()

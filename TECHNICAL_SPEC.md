@@ -11,6 +11,9 @@
 - **Auto-Scroll Trigger:** Автоматичне наведення на вікно, де відбулася важлива подія детекції.
 - **Lazy Window Rendering:** Вікна камер створюються лише коли слот активовано.
 - **Platform Streams:** Підтримка YouTube/платформ через yt-dlp (resolved URL cache).
+- **Web Multi-Stream View:** Користувач обирає N слотів для одночасного перегляду.
+- **Theme Toggle:** Світла/темна тема у web та desktop.
+- **Resizable Sidebar:** Сайдбар можна масштабувати/згортати у desktop.
 
 ### 2.2. Детектування та Аналітика (AI Engine)
 - **Multi-Model Support:** Підтримка YOLOv8, YOLOv10, RT-DETR.
@@ -28,6 +31,7 @@
 - **Auth System:** Доступ до веб-сервісу за паролем.
 - **Real-time Web Controls:** Вибір джерел/моделей та запуск потоків напряму з Web UI.
 - **Device Status:** Показ активного GPU/CPU у desktop і web інтерфейсах.
+- **Slot Init:** Десктоп стартує з 1 слотом, далі слоти додаються вручну.
 
 ## 3. Технічні Характеристики
 ### 3.1. Системні вимоги
