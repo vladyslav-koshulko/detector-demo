@@ -18,10 +18,11 @@ class StateManager:
         self.state_file = "system_state.json"
         self.data = {
             "web_server_running": False,
-            "web_users_auth": {"admin": "admin123"}, # login: password
-            "user_access": {}, # login: status (pending/allowed/blocked)
+            "web_users_auth": {"admin": "admin123", "user": "user123"},
+            "user_sessions": {}, 
+            "grid_columns": 2,
             "slot_configs": [
-                {"id": 0, "src": "0", "model": "Mock (No Model)", "mode": "Live", "conf": 0.5, "quality": "480p", "visibility_map": {}, "night_mode": False, "running": False}
+                {"id": 0, "src": "0", "model": "Mock (No Model)", "mode": "Live", "conf": 0.5, "quality": "480p", "visibility_map": {}, "night_mode": False, "running": False, "zoom": 1.0}
             ],
             "saved_sources": ["0", "1"],
             "next_slot_id": 1
@@ -33,38 +34,34 @@ class StateManager:
             try:
                 with open(self.state_file, 'r') as f:
                     saved = json.load(f)
-                    
-                    # Migration: Перевірка наявності 'id' у завантажених конфігураціях
+                    # Migration
                     if "slot_configs" in saved:
                         for idx, slot in enumerate(saved["slot_configs"]):
-                            if "id" not in slot:
-                                slot["id"] = idx
-                        
-                        # Оновлення next_slot_id на основі завантажених даних
-                        if saved["slot_configs"]:
-                            saved["next_slot_id"] = max(s["id"] for s in saved["slot_configs"]) + 1
-                    
+                            if "id" not in slot: slot["id"] = idx
                     self.data.update(saved)
-            except Exception as e:
-                print(f"Error loading state: {e}")
+            except: pass
+        if not self.data.get("web_users_auth"):
+            self.data["web_users_auth"] = {"admin": "admin123", "user": "user123"}
+            self.save()
 
     def save(self):
         with open(self.state_file, 'w') as f:
             json.dump(self.data, f, indent=4)
 
+    def add_saved_source(self, src):
+        if src not in self.data["saved_sources"]:
+            self.data["saved_sources"].append(src)
+            self.save()
+
     def add_slot(self):
         new_id = self.data["next_slot_id"]
         self.data["slot_configs"].append({
             "id": new_id, "src": "0", "model": "Mock (No Model)", "mode": "Live", 
-            "conf": 0.5, "quality": "480p", "visibility_map": {}, "night_mode": False, "running": False
+            "conf": 0.5, "quality": "480p", "visibility_map": {}, "night_mode": False, "running": False, "zoom": 1.0
         })
         self.data["next_slot_id"] += 1
         self.save()
         return new_id
-
-    def remove_slot(self, slot_id):
-        self.data["slot_configs"] = [s for s in self.data["slot_configs"] if s["id"] != slot_id]
-        self.save()
 
     def update_slot(self, slot_id, config):
         for s in self.data["slot_configs"]:
@@ -73,10 +70,13 @@ class StateManager:
                 break
         self.save()
 
-    def manage_user(self, login, action):
-        if action == "delete":
-            if login in self.data["user_access"]: del self.data["user_access"][login]
-            if login in self.data["web_users_auth"]: del self.data["web_users_auth"][login]
-        else:
-            self.data["user_access"][login] = action # allowed / blocked
+    def manage_user(self, login, action, role=None):
+        if login not in self.data["user_sessions"]:
+            self.data["user_sessions"][login] = {"status": "active", "role": "view"}
+        if action == "login":
+            self.data["user_sessions"][login]["status"] = "active"
+        elif action == "block": self.data["user_sessions"][login]["status"] = "blocked"
+        elif action == "set_role": self.data["user_sessions"][login]["role"] = role
+        elif action == "delete": 
+            if login in self.data["user_sessions"]: del self.data["user_sessions"][login]
         self.save()

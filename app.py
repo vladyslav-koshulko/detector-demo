@@ -4,109 +4,150 @@ import time
 import os
 import torch
 import numpy as np
-from engine import DetectionEngine, get_available_models
+import tempfile
+from engine import DetectionEngine, get_available_models, download_model_from_url, save_uploaded_model
 from streamer import MultiCameraStreamer
 from state_manager import StateManager
 
-# Mobile-First Config
-st.set_page_config(page_title="Vision Mobile v4", layout="centered", initial_sidebar_state="collapsed")
+# UI Config
+st.set_page_config(page_title="Vision Web Node Pro", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
     <style>
     .stDeployButton {display:none;}
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 600px;}
-    img {border-radius: 20px; border: 4px solid #1e1e1e; margin-bottom: 15px; width: 100% !important;}
-    .stButton>button {width: 100%; height: 4rem; border-radius: 15px; font-weight: bold; font-size: 1.2rem; background-color: #007BFF; color: white;}
+    img {border-radius: 10px; border: 2px solid #333;}
+    .stButton>button {width: 100%;}
     </style>
     """, unsafe_allow_html=True)
 
 state = StateManager()
 streamer = MultiCameraStreamer()
 
-# 🔐 LOGIN / AUTH LOGIC
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.username = None
+# 🔐 AUTH
+if 'auth' not in st.session_state: st.session_state.auth = False
 
-def login_screen():
+if not st.session_state.auth:
     st.title("🔐 Vision Login")
-    with st.form("login_form"):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.form_submit_button("Увійти"):
+    with st.form("login"):
+        u = st.text_input("User")
+        p = st.text_input("Pass", type="password")
+        if st.form_submit_button("Login"):
             if u in state.data["web_users_auth"] and state.data["web_users_auth"][u] == p:
-                st.session_state.logged_in = True
-                st.session_state.username = u
+                st.session_state.auth = True
+                st.session_state.user = u
+                state.manage_user(u, "login")
                 st.rerun()
-            else:
-                st.error("Невірний логін або пароль")
+            else: st.error("Access Denied")
     st.stop()
 
-if not st.session_state.logged_in:
-    login_screen()
+user = st.session_state.user
+role = state.data["user_sessions"].get(user, {}).get("role", "view")
 
-# 🛡️ Access Control from Admin
-username = st.session_state.username
-status = state.data["user_access"].get(username, "pending")
-
-if status == "blocked":
-    st.error("🚫 Доступ заблоковано Адміністратором.")
-    st.stop()
-elif status == "pending":
-    st.warning("⏳ Очікування підтвердження доступу від Адміністратора...")
-    st.info(f"Ваш акаунт: {username}. Будь ласка, попросіть адміна надати доступ.")
-    time.sleep(5)
-    st.rerun()
-
-# 📹 MAIN STREAMING UI
-st.title("📡 Vision Mobile")
-
-active_slots = [s for s in state.data["slot_configs"] if s["running"]]
-
-if not active_slots:
-    st.info("👋 Камери поки що вимкнені Адміністратором.")
-    if st.button("🔄 Оновити"): st.rerun()
-else:
-    # Navigation
-    tab_labels = [f"Камера {s['id']+1}" for s in active_slots]
-    selected = st.selectbox("Оберіть камеру:", tab_labels)
+# 📹 WEB SIDEBAR (Full Control)
+with st.sidebar:
+    st.title(f"👤 {user} ({role})")
     
-    s_idx = int(selected.split(" ")[1]) - 1
-    # Find exact config by ID
-    cfg = next((s for s in active_slots if s["id"] == s_idx), active_slots[0])
-    
-    # Session Engine Init
-    eng_key = f"web_v4_eng_{cfg['id']}_{cfg['model']}"
-    if eng_key not in st.session_state:
-        m_path = None if "Mock" in cfg["model"] else cfg["model"]
-        st.session_state[eng_key] = DetectionEngine(model_path=m_path, threshold=cfg["conf"])
-    
-    engine = st.session_state[eng_key]
-    placeholder = st.empty()
-    
-    # Loop
-    while True:
-        # Check if still running in Admin
-        fresh_state = StateManager() # reload from file
-        cfg_fresh = next((s for s in fresh_state.data["slot_configs"] if s["id"] == cfg["id"]), None)
-        if not cfg_fresh or not cfg_fresh["running"]:
-            st.warning("⚠️ Потік зупинено.")
-            time.sleep(2); st.rerun()
+    # Sources Management
+    st.subheader("📷 Джерела")
+    new_url = st.text_input("Додати URL (IP/RTSP):")
+    if st.button("Додати URL"):
+        if new_url: state.add_saved_source(new_url); st.success("OK")
 
-        frame = streamer.get_frame(cfg["src"])
-        if frame is not None:
-            # Web node respects visibility_map from Admin
-            processed, _ = engine.process_frame(
-                frame, view_type=cfg["mode"], 
-                visibility_map=cfg["visibility_map"],
-                night_mode=cfg["night_mode"],
-                quality=cfg["quality"]
-            )
-            rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-            placeholder.image(rgb)
+    folder_path = st.text_input("Додати папку (локальна/мережева):")
+    if st.button("Додати папку"):
+        if folder_path and os.path.isdir(folder_path):
+            state.add_saved_source(folder_path); st.success("Папку додано")
+        elif folder_path:
+            st.error("Папку не знайдено")
+    
+    up_file = st.file_uploader(
+        "Завантажити файл (Video/Img):",
+        type=['mp4','avi','mkv','mov','wmv','webm','m4v','mpeg','mpg','jpg','jpeg','png','bmp','tiff','tif','webp']
+    )
+    if up_file:
+        t = tempfile.NamedTemporaryFile(delete=False, suffix='.'+up_file.name.split('.')[-1])
+        t.write(up_file.read())
+        state.add_saved_source(t.name)
+        st.success("Файл додано")
+
+    st.divider()
+    # Models Management
+    st.subheader("🧠 Моделі")
+    model_url = st.text_input("URL моделі (.pt/.pth)")
+    if st.button("Завантажити модель"):
+        if model_url:
+            try:
+                target = download_model_from_url(model_url)
+                st.success(f"Модель збережено: {target}")
+            except Exception as exc:
+                st.error(f"Помилка завантаження: {exc}")
+
+    model_file = st.file_uploader("Завантажити модель (.pt/.pth)", type=['pt', 'pth'])
+    if model_file:
+        try:
+            target = save_uploaded_model(model_file.getvalue(), model_file.name)
+            st.success(f"Модель збережено: {target}")
+        except Exception as exc:
+            st.error(f"Помилка збереження: {exc}")
+
+    st.divider()
+    # Slot Config (for current user view)
+    st.subheader("⚙️ Налаштування вікна")
+    slots = state.data["slot_configs"]
+    sel_slot = st.selectbox("Оберіть камеру:", [f"Slot {s['id']+1}" for s in slots])
+    slot_id = int(sel_slot.split(" ")[1]) - 1
+    cfg = next(s for s in slots if s["id"] == slot_id)
+
+    sources = state.data["saved_sources"]
+    models = get_available_models()
+    src_index = sources.index(cfg["src"]) if cfg["src"] in sources else 0
+    model_index = models.index(cfg["model"]) if cfg["model"] in models else 0
+
+    src_choice = st.selectbox("Джерело", sources, index=src_index)
+    model_choice = st.selectbox("Модель", models, index=model_index)
+
+    v_mode = st.selectbox("Mode:", ["Live", "Heatmap"], index=0)
+    v_qual = st.selectbox("Quality:", ["480p", "720p", "360p"], index=0)
+
+    col_a, col_b = st.columns(2)
+    if col_a.button("▶️ Start"):
+        if os.path.isdir(src_choice):
+            st.error("Папку не можна запускати як live-стрім. Використайте desktop batch-детекцію.")
         else:
-            placeholder.info("Підключення...")
-        
-        time.sleep(0.05)
+            state.update_slot(slot_id, {"src": src_choice, "model": model_choice, "running": True, "mode": v_mode, "quality": v_qual})
+            st.success("Запущено")
+            st.rerun()
+    if col_b.button("⏹ Stop"):
+        state.update_slot(slot_id, {"running": False})
+        st.warning("Зупинено")
+        st.rerun()
+
+# 📺 MAIN VIEW
+st.title("📡 Vision Real-Time Feed")
+
+# Init Engine for Web
+eng_key = f"web_eng_{slot_id}_{cfg['model']}"
+if eng_key not in st.session_state:
+    st.session_state[eng_key] = DetectionEngine(model_path=None if "Mock" in cfg["model"] else cfg["model"])
+
+engine = st.session_state[eng_key]
+placeholder = st.empty()
+
+# Streaming
+if not cfg.get("running"):
+    st.info("Потік зупинений. Запустіть його в сайдбарі.")
+    st.stop()
+
+if cfg["src"] not in streamer.running: streamer.start(cfg["src"])
+
+while True:
+    frame = streamer.get_frame(cfg["src"])
+    if frame is not None:
+        processed, _ = engine.process_frame(
+            frame, view_type=v_mode, quality=v_qual,
+            visibility_map=cfg["visibility_map"], night_mode=cfg["night_mode"], zoom=cfg["zoom"]
+        )
+        placeholder.image(cv2.cvtColor(processed, cv2.COLOR_BGR2RGB))
+    else:
+        placeholder.warning("Connecting...")
+    time.sleep(0.05)

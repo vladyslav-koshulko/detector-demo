@@ -6,9 +6,12 @@ os.environ["QT_PLUGIN_PATH"] = ""
 
 import cv2
 import threading
-import signal
 import subprocess
 import time
+import tempfile
+import zipfile
+import shutil
+from datetime import datetime
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QImage, QPixmap
@@ -20,225 +23,275 @@ class VideoWidget(QtWidgets.QLabel):
     def __init__(self, slot_id, parent=None):
         super().__init__(parent)
         self.slot_id = slot_id
-        self.setMinimumSize(480, 270)
+        self.setMinimumSize(400, 225)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background-color: #1a1a1a; border: 2px solid #333; border-radius: 8px;")
         self.setText(f"Камера #{slot_id + 1}")
         self.setScaledContents(False)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+        self.last_frame = None
 
     def update_frame(self, frame):
         if frame is None: return
+        self.last_frame = frame.copy()
         h, w, ch = frame.shape
         q_img = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
-        scaled = QPixmap.fromImage(q_img).scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.setPixmap(scaled)
+        self.setPixmap(QPixmap.fromImage(q_img).scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-class UserTable(QtWidgets.QTableWidget):
-    def __init__(self, parent=None):
-        super().__init__(0, 3, parent)
-        self.setHorizontalHeaderLabels(["Користувач", "Статус", "Дії"])
-        self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        self.state = StateManager()
-
-    def refresh(self):
-        self.setRowCount(0)
-        # Auth: User Access Status
-        for login, status in self.state.data["user_access"].items():
-            row = self.rowCount()
-            self.insertRow(row)
-            self.setItem(row, 0, QtWidgets.QTableWidgetItem(login))
-            self.setItem(row, 1, QtWidgets.QTableWidgetItem(status.upper()))
-            
-            btn_panel = QtWidgets.QWidget()
-            l = QtWidgets.QHBoxLayout(btn_panel)
-            l.setContentsMargins(0, 0, 0, 0)
-            
-            btn_allow = QtWidgets.QPushButton("Allow")
-            btn_allow.clicked.connect(lambda _, log=login: self.state.manage_user(log, "allowed"))
-            btn_block = QtWidgets.QPushButton("Block")
-            btn_block.clicked.connect(lambda _, log=login: self.state.manage_user(log, "blocked"))
-            btn_del = QtWidgets.QPushButton("X")
-            btn_del.clicked.connect(lambda _, log=login: self.state.manage_user(log, "delete"))
-            
-            l.addWidget(btn_allow); l.addWidget(btn_block); l.addWidget(btn_del)
-            self.setCellWidget(row, 2, btn_panel)
+    def _show_context_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        save_act = menu.addAction("📸 Зберегти Snapshot")
+        menu.addSeparator()
+        z_in = menu.addAction("Zoom In")
+        z_out = menu.addAction("Zoom Out")
+        z_res = menu.addAction("Reset Zoom")
+        
+        act = menu.exec(self.mapToGlobal(pos))
+        state = StateManager()
+        cfg = next(s for s in state.data["slot_configs"] if s["id"] == self.slot_id)
+        
+        if act == save_act and self.last_frame is not None:
+            if not os.path.exists("results"): os.makedirs("results")
+            path = f"results/snapshot_{int(time.time())}.jpg"
+            cv2.imwrite(path, cv2.cvtColor(self.last_frame, cv2.COLOR_RGB2BGR))
+            QtWidgets.QMessageBox.information(self, "OK", f"Збережено: {path}")
+        elif act == z_in: state.update_slot(self.slot_id, {"zoom": cfg["zoom"] * 1.2})
+        elif act == z_out: state.update_slot(self.slot_id, {"zoom": max(1.0, cfg["zoom"] * 0.8)})
+        elif act == z_res: state.update_slot(self.slot_id, {"zoom": 1.0})
 
 class VisionAdminApp(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Vision Intelligence v4 Pro")
-        self.resize(1600, 1000)
+        self.setWindowTitle("Vision Intelligence v6 Pro")
+        self.resize(1600, 950)
         self.state = StateManager()
         self.streamer = MultiCameraStreamer()
         self.engines = {}
         self.web_process = None
         self._init_ui()
         self.timer = QTimer(); self.timer.timeout.connect(self._update_loop); self.timer.start(30)
-        self.list_timer = QTimer(); self.list_timer.timeout.connect(self._update_ui_lists); self.list_timer.start(2000)
 
     def _init_ui(self):
-        main_widget = QtWidgets.QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QtWidgets.QHBoxLayout(main_widget)
-
-        # 🛠️ LEFT: Controls Sidebar
-        scroll = QtWidgets.QScrollArea(); scroll.setFixedWidth(380); scroll.setWidgetResizable(True)
-        main_layout.addWidget(scroll)
-        ctrl_panel = QtWidgets.QWidget(); scroll.setWidget(ctrl_panel)
-        ctrl_layout = QtWidgets.QVBoxLayout(ctrl_panel)
-
-        # Group: WEB Server
-        web_group = QtWidgets.QGroupBox("🌐 Web Control Node")
-        web_l = QtWidgets.QVBoxLayout(web_group)
-        self.btn_web = QtWidgets.QPushButton("🚀 Start Web Server")
-        self.btn_web.clicked.connect(self.toggle_web_server)
-        web_l.addWidget(self.btn_web)
-        self.lbl_web = QtWidgets.QLabel("Status: Offline")
-        web_l.addWidget(self.lbl_web); ctrl_layout.addWidget(web_group)
-
-        # Group: Users (Table)
-        user_group = QtWidgets.QGroupBox("👤 Web Users Control")
-        user_l = QtWidgets.QVBoxLayout(user_group)
-        self.user_table = UserTable()
-        user_l.addWidget(self.user_table)
-        ctrl_layout.addWidget(user_group)
-
-        # Group: Camera Sources
-        src_group = QtWidgets.QGroupBox("💾 Video Sources")
-        src_l = QtWidgets.QVBoxLayout(src_group)
-        self.src_list = QtWidgets.QListWidget()
-        self.src_list.addItems(self.state.data["saved_sources"])
-        src_l.addWidget(self.src_list)
-        btn_add_src = QtWidgets.QPushButton("+ New Source")
-        btn_add_src.clicked.connect(self._add_source)
-        src_l.addWidget(btn_add_src)
-        ctrl_layout.addWidget(src_group)
-
-        # Group: Config Slots
-        self.slot_scroll = QtWidgets.QScrollArea(); self.slot_scroll.setFixedHeight(450)
-        self.slot_scroll.setWidgetResizable(True)
-        self.slot_container = QtWidgets.QWidget()
-        self.slot_layout = QtWidgets.QVBoxLayout(self.slot_container)
-        self.slot_scroll.setWidget(self.slot_container)
-        ctrl_layout.addWidget(self.slot_scroll)
-
-        self.btn_add_slot = QtWidgets.QPushButton("➕ Додати Новий Потік (Slot)")
-        self.btn_add_slot.clicked.connect(self.add_new_slot_ui)
-        ctrl_layout.addWidget(self.btn_add_slot)
-
-        # 📺 RIGHT: Main Scrollable Grid
-        self.grid_scroll = QtWidgets.QScrollArea()
-        self.grid_scroll.setWidgetResizable(True)
-        self.grid_container = QtWidgets.QWidget()
-        self.grid_layout = QtWidgets.QGridLayout(self.grid_container)
-        self.grid_scroll.setWidget(self.grid_container)
-        main_layout.addWidget(self.grid_scroll)
-
-        self.video_widgets = {}
-        for config in self.state.data["slot_configs"]:
-            self._build_slot_config_ui(config["id"])
-
-    def add_new_slot_ui(self):
-        new_id = self.state.add_slot()
-        self._build_slot_config_ui(new_id)
-
-    def _build_slot_config_ui(self, slot_id):
-        # UI Slot Card in Sidebar
-        card = QtWidgets.QFrame(); card.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        card.setStyleSheet("background-color: #333; margin-bottom: 5px; border-radius: 5px;")
-        l = QtWidgets.QVBoxLayout(card)
-        l.addWidget(QtWidgets.QLabel(f"<b>Вікно #{slot_id + 1}</b>"))
+        main = QtWidgets.QWidget(); self.setCentralWidget(main); layout = QtWidgets.QHBoxLayout(main)
         
-        src_cb = QtWidgets.QComboBox(); src_cb.addItems(self.state.data["saved_sources"])
-        mod_cb = QtWidgets.QComboBox(); mod_cb.addItems(get_available_models())
-        qual_cb = QtWidgets.QComboBox(); qual_cb.addItems(["Native", "720p", "480p", "360p"])
+        # Sidebar
+        scroll = QtWidgets.QScrollArea(); scroll.setFixedWidth(420); scroll.setWidgetResizable(True); layout.addWidget(scroll)
+        ctrl = QtWidgets.QWidget(); scroll.setWidget(ctrl); self.sidebar = QtWidgets.QVBoxLayout(ctrl)
+
+        # Settings
+        sg = QtWidgets.QGroupBox("🌐 System Control"); sl = QtWidgets.QVBoxLayout(sg)
+        self.btn_web = QtWidgets.QPushButton("🚀 Start Web Server"); self.btn_web.clicked.connect(self.toggle_web); sl.addWidget(self.btn_web)
         
-        l.addWidget(QtWidgets.QLabel("Source / Model:")); l.addWidget(src_cb); l.addWidget(mod_cb)
-        
-        h = QtWidgets.QHBoxLayout()
-        h.addWidget(QtWidgets.QLabel("Quality:")); h.addWidget(qual_cb)
-        l.addLayout(h)
+        gh = QtWidgets.QHBoxLayout(); gh.addWidget(QtWidgets.QLabel("Grid:")); self.spin = QtWidgets.QSpinBox(); self.spin.setRange(1,4); self.spin.setValue(self.state.data["grid_columns"]); self.spin.valueChanged.connect(self._grid_change); gh.addWidget(self.spin); sl.addLayout(gh)
+        self.sidebar.addWidget(sg)
 
-        night_cb = QtWidgets.QCheckBox("🌙 Night Boost (CLAHE)")
-        l.addWidget(night_cb)
+        # Users Table
+        self.user_table = QtWidgets.QTableWidget(0, 3); self.user_table.setHorizontalHeaderLabels(["User", "Role", "Actions"]); self.sidebar.addWidget(self.user_table)
 
-        # Visibility List
-        l.addWidget(QtWidgets.QLabel("Видимість Об'єктів:"))
-        vis_list = QtWidgets.QListWidget()
-        vis_list.setFixedHeight(100)
-        vis_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        l.addWidget(vis_list)
+        # Sources Manager
+        self.sidebar.addWidget(QtWidgets.QLabel("📂 Джерела (Saved Sources):"))
+        self.src_list = QtWidgets.QListWidget(); self.sidebar.addWidget(self.src_list)
+        bh = QtWidgets.QHBoxLayout()
+        b_url = QtWidgets.QPushButton("+ URL"); b_url.clicked.connect(self._add_url)
+        b_file = QtWidgets.QPushButton("+ File"); b_file.clicked.connect(self._add_file)
+        b_folder = QtWidgets.QPushButton("+ Folder"); b_folder.clicked.connect(self._add_folder)
+        bh.addWidget(b_url); bh.addWidget(b_file); bh.addWidget(b_folder); self.sidebar.addLayout(bh)
 
-        btn_start = QtWidgets.QPushButton("🚀 Start Stream")
-        btn_start.clicked.connect(lambda: self.start_slot(slot_id, src_cb, mod_cb, qual_cb, night_cb, vis_list))
-        l.addWidget(btn_start)
+        # Folder Batch Processing
+        fb = QtWidgets.QGroupBox("🗂️ Batch Folder Detection")
+        fbl = QtWidgets.QVBoxLayout(fb)
+        self.folder_path_label = QtWidgets.QLabel("Папка не вибрана")
+        fbl.addWidget(self.folder_path_label)
+        fb_buttons = QtWidgets.QHBoxLayout()
+        self.btn_pick_folder = QtWidgets.QPushButton("📁 Обрати папку")
+        self.btn_pick_folder.clicked.connect(self._select_batch_folder)
+        fb_buttons.addWidget(self.btn_pick_folder)
+        fbl.addLayout(fb_buttons)
+        self.folder_model_cb = QtWidgets.QComboBox(); self.folder_model_cb.addItems(get_available_models()); fbl.addWidget(self.folder_model_cb)
+        self.btn_run_batch = QtWidgets.QPushButton("▶️ Запустити та зберегти ZIP")
+        self.btn_run_batch.clicked.connect(self._run_batch_folder)
+        fbl.addWidget(self.btn_run_batch)
+        self.sidebar.addWidget(fb)
 
-        self.slot_layout.insertWidget(self.slot_layout.count(), card)
-        
-        # Build Widget in Grid
-        vw = VideoWidget(slot_id)
-        self.video_widgets[slot_id] = vw
-        row, col = len(self.video_widgets)//2, len(self.video_widgets)%2
-        self.grid_layout.addWidget(vw, row, col)
+        # Config Area
+        self.slot_area = QtWidgets.QVBoxLayout(); self.sidebar.addLayout(self.slot_area)
+        self.btn_add = QtWidgets.QPushButton("➕ Add New Slot"); self.btn_add.clicked.connect(self._add_slot_ui); self.sidebar.addWidget(self.btn_add)
+        self.sidebar.addStretch()
 
-    def start_slot(self, slot_id, src_cb, mod_cb, qual_cb, night_cb, vis_list):
-        src, mod, qual = src_cb.currentText(), mod_cb.currentText(), qual_cb.currentText()
-        night = night_cb.isChecked()
-        
-        if slot_id not in self.engines:
-            m_path = None if "Mock" in mod else mod
-            self.engines[slot_id] = DetectionEngine(model_path=m_path)
-            # Fill visibility map first time
-            for cls in self.engines[slot_id].get_all_classes():
-                item = QtWidgets.QListWidgetItem(cls)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)
-                vis_list.addItem(item)
-        
-        vis_map = {}
-        for i in range(vis_list.count()):
-            it = vis_list.item(i)
-            vis_map[it.text()] = (it.checkState() == Qt.Checked)
+        # Matrix
+        self.grid_scroll = QtWidgets.QScrollArea(); self.grid_scroll.setWidgetResizable(True); self.grid_container = QtWidgets.QWidget(); self.grid_layout = QtWidgets.QGridLayout(self.grid_container); self.grid_scroll.setWidget(self.grid_container); layout.addWidget(self.grid_scroll)
 
-        self.state.update_slot(slot_id, {
-            "src": src, "model": mod, "quality": qual, "night_mode": night,
-            "visibility_map": vis_map, "running": True
-        })
-        self.streamer.start(src)
+        self.widgets = {}
+        for c in self.state.data["slot_configs"]: self._build_slot_ui(c["id"])
+        self._rebuild_grid()
 
-    def toggle_web_server(self):
-        if not self.web_process:
-            self.web_process = subprocess.Popen(["streamlit", "run", "app.py"])
-            self.state.set_web_status(True)
-        else:
-            self.web_process.terminate(); self.web_process = None
-            self.state.set_web_status(False)
+    def _add_url(self):
+        t, ok = QtWidgets.QInputDialog.getText(self, "URL", "Enter RTSP/HTTP:"); 
+        if ok and t: self.state.add_saved_source(t); self._refresh_srcs()
 
-    def _add_source(self):
-        text, ok = QtWidgets.QInputDialog.getText(self, "New Source", "Enter IP/DNS/URL:")
-        if ok and text:
-            self.state.data["saved_sources"].append(text); self.state.save()
-            self._update_ui_lists()
+    def _add_file(self):
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Media",
+            "",
+            "Media (*.mp4 *.avi *.mkv *.mov *.wmv *.webm *.m4v *.mpeg *.mpg *.jpg *.jpeg *.png *.bmp *.tiff *.tif *.webp)"
+        )
+        if f: self.state.add_saved_source(f); self._refresh_srcs()
 
-    def _update_ui_lists(self):
+    def _add_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder:
+            self.state.add_saved_source(folder)
+            self._refresh_srcs()
+
+    def _select_batch_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder:
+            self.folder_path_label.setText(folder)
+
+    def _refresh_srcs(self):
         self.src_list.clear(); self.src_list.addItems(self.state.data["saved_sources"])
-        self.user_table.refresh()
+        # Update all slot combos
+        for i in range(self.slot_area.count()):
+            w = self.slot_area.itemAt(i).widget()
+            if w:
+                cb = w.findChild(QtWidgets.QComboBox)
+                if cb: cur = cb.currentText(); cb.clear(); cb.addItems(self.state.data["saved_sources"]); cb.setCurrentText(cur)
+
+    def _add_slot_ui(self): nid = self.state.add_slot(); self._build_slot_ui(nid); self._rebuild_grid()
+
+    def _build_slot_ui(self, sid):
+        card = QtWidgets.QFrame(); card.setStyleSheet("background: #333; border-radius: 5px; margin: 2px;"); l = QtWidgets.QVBoxLayout(card)
+        l.addWidget(QtWidgets.QLabel(f"<b>Slot #{sid+1}</b>"))
+        scb = QtWidgets.QComboBox(); scb.addItems(self.state.data["saved_sources"]); l.addWidget(scb)
+        mcb = QtWidgets.QComboBox(); mcb.addItems(get_available_models()); l.addWidget(mcb)
+        
+        btn = QtWidgets.QPushButton("🚀 Apply"); btn.clicked.connect(lambda: self._start_slot(sid, scb, mcb)); l.addWidget(btn)
+        self.slot_area.addWidget(card)
+
+    def _start_slot(self, sid, scb, mcb):
+        src = scb.currentText()
+        if os.path.isdir(src):
+            QtWidgets.QMessageBox.warning(self, "Unsupported", "Папку не можна запускати як live-стрім. Використайте Batch Folder Detection.")
+            return
+        self.state.update_slot(sid, {"src": src, "model": mcb.currentText(), "running": True})
+        self.streamer.start(src)
+        self.engines[sid] = DetectionEngine(model_path=None if "Mock" in mcb.currentText() else mcb.currentText())
+        if sid not in self.widgets: self.widgets[sid] = VideoWidget(sid)
+        self._rebuild_grid()
+
+    def _rebuild_grid(self):
+        for i in reversed(range(self.grid_layout.count())): self.grid_layout.itemAt(i).widget().setParent(None)
+        cols = self.state.data["grid_columns"]
+        active_ids = [s["id"] for s in self.state.data["slot_configs"] if s.get("running")]
+        for idx, sid in enumerate(sorted(active_ids)):
+            if sid not in self.widgets:
+                self.widgets[sid] = VideoWidget(sid)
+            self.grid_layout.addWidget(self.widgets[sid], idx // cols, idx % cols)
+
+    def _grid_change(self, v): self.state.data["grid_columns"] = v; self._rebuild_grid()
+
+    def toggle_web(self):
+        if not self.web_process: self.web_process = subprocess.Popen(["streamlit", "run", "app.py"]); self.btn_web.setText("Stop Web")
+        else: self.web_process.terminate(); self.web_process = None; self.btn_web.setText("Start Web")
 
     def _update_loop(self):
-        for slot_id, vw in self.video_widgets.items():
-            config = next((s for s in self.state.data["slot_configs"] if s["id"] == slot_id), None)
-            if config and config["running"]:
-                frame = self.streamer.get_frame(config["src"])
-                if frame is not None:
-                    processed, _ = self.engines[slot_id].process_frame(
-                        frame, night_mode=config["night_mode"], visibility_map=config["visibility_map"]
-                    )
-                    vw.update_frame(cv2.cvtColor(processed, cv2.COLOR_BGR2RGB))
+        for sid, w in self.widgets.items():
+            cfg = next((s for s in self.state.data["slot_configs"] if s["id"] == sid), None)
+            if cfg and cfg["running"]:
+                f = self.streamer.get_frame(cfg["src"])
+                if f is not None:
+                    if sid not in self.engines: self.engines[sid] = DetectionEngine(model_path=None if "Mock" in cfg["model"] else cfg["model"])
+                    p, _ = self.engines[sid].process_frame(f, night_mode=cfg["night_mode"], quality=cfg["quality"], zoom=cfg["zoom"])
+                    w.update_frame(cv2.cvtColor(p, cv2.COLOR_BGR2RGB))
 
-    def closeEvent(self, event):
-        self.streamer.stop_all()
-        if self.web_process: self.web_process.terminate()
-        event.accept()
+    def _run_batch_folder(self):
+        folder = self.folder_path_label.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QtWidgets.QMessageBox.warning(self, "Folder", "Оберіть папку з файлами.")
+            return
+        model_path = self.folder_model_cb.currentText()
+        self._process_folder_batch(folder, model_path)
+
+    def _process_folder_batch(self, folder, model_path):
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
+        video_exts = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm", ".m4v", ".mpeg", ".mpg"}
+        files = []
+        for root, _, names in os.walk(folder):
+            for name in names:
+                ext = os.path.splitext(name)[1].lower()
+                if ext in image_exts or ext in video_exts:
+                    full = os.path.join(root, name)
+                    files.append(full)
+        files = sorted(files, key=lambda p: os.path.getmtime(p))
+        if not files:
+            QtWidgets.QMessageBox.information(self, "Folder", "Не знайдено підтримуваних файлів.")
+            return
+
+        model_label = "Mock" if "Mock" in model_path else os.path.splitext(os.path.basename(model_path))[0]
+        date_stamp = datetime.now().strftime("%Y%m%d")
+        default_zip = f"{model_label}_{date_stamp}_detected.zip"
+        save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save ZIP", default_zip, "ZIP (*.zip)")
+        if not save_path:
+            return
+
+        temp_dir = tempfile.mkdtemp(prefix="batch_detect_")
+        engine = DetectionEngine(model_path=None if "Mock" in model_path else model_path)
+        progress = QtWidgets.QProgressDialog("Processing files...", "Cancel", 0, len(files), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        output_files = []
+        try:
+            for idx, path in enumerate(files, start=1):
+                if progress.wasCanceled():
+                    break
+                ext = os.path.splitext(path)[1].lower()
+                rel_dir = os.path.relpath(os.path.dirname(path), folder)
+                rel_dir = "" if rel_dir == "." else rel_dir
+                target_dir = os.path.join(temp_dir, rel_dir)
+                os.makedirs(target_dir, exist_ok=True)
+                if ext in image_exts:
+                    frame = cv2.imread(path)
+                    if frame is None:
+                        continue
+                    processed, _ = engine.process_frame(frame)
+                    out_name = os.path.splitext(os.path.basename(path))[0] + "_detected.jpg"
+                    out_path = os.path.join(target_dir, out_name)
+                    cv2.imwrite(out_path, processed)
+                    output_files.append(out_path)
+                else:
+                    cap = cv2.VideoCapture(path)
+                    if not cap.isOpened():
+                        continue
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    out_name = os.path.splitext(os.path.basename(path))[0] + "_detected.mp4"
+                    out_path = os.path.join(target_dir, out_name)
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        processed, _ = engine.process_frame(frame)
+                        writer.write(processed)
+                    writer.release()
+                    cap.release()
+                    output_files.append(out_path)
+                progress.setValue(idx)
+                QtWidgets.QApplication.processEvents()
+
+            with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for full in output_files:
+                    arc = os.path.relpath(full, temp_dir)
+                    zf.write(full, arc)
+
+            QtWidgets.QMessageBox.information(self, "Done", f"Архів збережено: {save_path}")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv); app.setStyle("Fusion")
