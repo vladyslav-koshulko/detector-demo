@@ -48,6 +48,40 @@ def save_uploaded_model(file_bytes, filename):
         f.write(file_bytes)
     return target
 
+
+def list_compute_devices():
+    devices = [("auto", "Auto (GPU if available)"), ("cpu", "CPU")]
+    if torch.cuda.is_available():
+        for idx in range(torch.cuda.device_count()):
+            name = torch.cuda.get_device_name(idx)
+            devices.append((f"cuda:{idx}", f"GPU{idx}: {name}"))
+    return devices
+
+
+def resolve_device(device_choice):
+    if not device_choice or device_choice == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if isinstance(device_choice, str) and device_choice.startswith("cuda"):
+        if torch.cuda.is_available():
+            try:
+                idx = int(device_choice.split(":")[1]) if ":" in device_choice else 0
+                return device_choice if idx < torch.cuda.device_count() else "cpu"
+            except (ValueError, IndexError):
+                return "cpu"
+        return "cpu"
+    return "cpu"
+
+
+def describe_device(device):
+    if isinstance(device, str) and device.startswith("cuda") and torch.cuda.is_available():
+        try:
+            idx = int(device.split(":")[1]) if ":" in device else 0
+            if idx < torch.cuda.device_count():
+                return f"GPU{idx}: {torch.cuda.get_device_name(idx)}"
+        except (ValueError, IndexError):
+            pass
+    return "CPU"
+
 class MockResult:
     def __init__(self, frame):
         self.orig_shape = frame.shape[:2]
@@ -61,18 +95,34 @@ class MockModel:
         return [MockResult(frames)]
 
 @st.cache_resource
-def load_detection_model(path):
-    if path is None or "Mock" in str(path): return MockModel()
+def load_detection_model(path, device=None):
+    if path is None or "Mock" in str(path):
+        return MockModel()
+    if str(path).lower().endswith(".pth"):
+        logger.warning("Unsupported model suffix for Ultralytics: %s (use .pt)", path)
+        return MockModel()
     try:
-        if "rtdetr" in path.lower(): model = RTDETR(path)
-        else: model = YOLO(path)
+        if "rtdetr" in path.lower():
+            model = RTDETR(path)
+        else:
+            model = YOLO(path)
+        if device:
+            try:
+                model.to(device)
+            except Exception as exc:
+                logger.warning("Failed to move model to device %s: %s", device, exc)
         return model
-    except: return MockModel()
+    except Exception as exc:
+        logger.exception("Failed to load model %s: %s", path, exc)
+        return MockModel()
 
 class DetectionEngine:
-    def __init__(self, model_path=None, threshold=0.5):
+    def __init__(self, model_path=None, threshold=0.5, device="auto"):
         self.threshold = threshold
-        self.model = load_detection_model(model_path)
+        self.device_choice = device
+        self.device = resolve_device(device)
+        self.device_label = describe_device(self.device)
+        self.model = load_detection_model(model_path, device=self.device)
         self.classes = getattr(self.model, 'names', {0: "object"})
         self.box_annotator = sv.BoxAnnotator()
         self.label_annotator = sv.LabelAnnotator()
@@ -98,7 +148,7 @@ class DetectionEngine:
         work_frame = cv2.resize(frame, (tw, int(h * (tw / w))))
         
         if view_type == "Live":
-            res = self.model(work_frame, conf=self.threshold, verbose=False)
+            res = self.model(work_frame, conf=self.threshold, verbose=False, device=self.device)
             try:
                 detections = sv.Detections.from_ultralytics(res[0])
                 if visibility_map:

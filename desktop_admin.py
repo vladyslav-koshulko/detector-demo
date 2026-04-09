@@ -15,7 +15,7 @@ from datetime import datetime
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QImage, QPixmap
-from engine import DetectionEngine, get_available_models
+from engine import DetectionEngine, get_available_models, list_compute_devices
 from streamer import MultiCameraStreamer, scan_cameras
 from state_manager import StateManager
 
@@ -68,6 +68,8 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         self.state = StateManager()
         self.streamer = MultiCameraStreamer()
         self.engines = {}
+        self.slot_device_choices = {}
+        self.slot_device_labels = {}
         self.web_process = None
         self._init_ui()
         self.timer = QTimer(); self.timer.timeout.connect(self._update_loop); self.timer.start(30)
@@ -166,18 +168,33 @@ class VisionAdminApp(QtWidgets.QMainWindow):
         l.addWidget(QtWidgets.QLabel(f"<b>Slot #{sid+1}</b>"))
         scb = QtWidgets.QComboBox(); scb.addItems(self.state.data["saved_sources"]); l.addWidget(scb)
         mcb = QtWidgets.QComboBox(); mcb.addItems(get_available_models()); l.addWidget(mcb)
+        dcb = QtWidgets.QComboBox()
+        for dev_id, label in list_compute_devices():
+            dcb.addItem(label, userData=dev_id)
+        l.addWidget(dcb)
+        device_label = QtWidgets.QLabel("Device: Auto")
+        l.addWidget(device_label)
         
-        btn = QtWidgets.QPushButton("🚀 Apply"); btn.clicked.connect(lambda: self._start_slot(sid, scb, mcb)); l.addWidget(btn)
+        btn = QtWidgets.QPushButton("🚀 Apply")
+        btn.clicked.connect(lambda _=False, sid=sid, scb=scb, mcb=mcb, dcb=dcb, label=device_label: self._start_slot(sid, scb, mcb, dcb, label))
+        l.addWidget(btn)
         self.slot_area.addWidget(card)
+        self.slot_device_labels[sid] = device_label
 
-    def _start_slot(self, sid, scb, mcb):
+    def _start_slot(self, sid, scb, mcb, dcb, device_label):
         src = scb.currentText()
         if os.path.isdir(src):
             QtWidgets.QMessageBox.warning(self, "Unsupported", "Папку не можна запускати як live-стрім. Використайте Batch Folder Detection.")
             return
+        device_choice = dcb.currentData() or "auto"
+        self.slot_device_choices[sid] = device_choice
         self.state.update_slot(sid, {"src": src, "model": mcb.currentText(), "running": True})
         self.streamer.start(src)
-        self.engines[sid] = DetectionEngine(model_path=None if "Mock" in mcb.currentText() else mcb.currentText())
+        self.engines[sid] = DetectionEngine(
+            model_path=None if "Mock" in mcb.currentText() else mcb.currentText(),
+            device=device_choice
+        )
+        device_label.setText(f"Device: {self.engines[sid].device_label}")
         if sid not in self.widgets: self.widgets[sid] = VideoWidget(sid)
         self._rebuild_grid()
 
@@ -202,7 +219,15 @@ class VisionAdminApp(QtWidgets.QMainWindow):
             if cfg and cfg["running"]:
                 f = self.streamer.get_frame(cfg["src"])
                 if f is not None:
-                    if sid not in self.engines: self.engines[sid] = DetectionEngine(model_path=None if "Mock" in cfg["model"] else cfg["model"])
+                    if sid not in self.engines:
+                        device_choice = self.slot_device_choices.get(sid, "auto")
+                        self.engines[sid] = DetectionEngine(
+                            model_path=None if "Mock" in cfg["model"] else cfg["model"],
+                            device=device_choice
+                        )
+                        label = self.slot_device_labels.get(sid)
+                        if label:
+                            label.setText(f"Device: {self.engines[sid].device_label}")
                     p, _ = self.engines[sid].process_frame(f, night_mode=cfg["night_mode"], quality=cfg["quality"], zoom=cfg["zoom"])
                     w.update_frame(cv2.cvtColor(p, cv2.COLOR_BGR2RGB))
 

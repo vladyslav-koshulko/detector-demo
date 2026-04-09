@@ -6,6 +6,11 @@ import logging
 from collections import deque
 from datetime import datetime
 
+try:
+    from yt_dlp import YoutubeDL
+except Exception:  # Optional dependency
+    YoutubeDL = None
+
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -20,6 +25,34 @@ class MultiCameraStreamer:
         self.recorders = {}
         self.recording_flags = {}
         self.is_image = {} # Track if source is a static image
+        self.resolved_urls = {}
+
+    def _resolve_stream_url(self, source_id):
+        if not isinstance(source_id, str):
+            return source_id
+        if source_id in self.resolved_urls:
+            return self.resolved_urls[source_id]
+        if not source_id.startswith("http"):
+            return source_id
+        if YoutubeDL is None:
+            logger.warning("yt-dlp is not installed. Using raw URL: %s", source_id)
+            return source_id
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "best[ext=mp4]/best",
+            "noplaylist": True,
+        }
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(source_id, download=False)
+                resolved = info.get("url") or source_id
+                self.resolved_urls[source_id] = resolved
+                logger.info("Resolved stream URL via yt-dlp: %s", source_id)
+                return resolved
+        except Exception as exc:
+            logger.warning("Failed to resolve URL %s: %s", source_id, exc)
+            return source_id
 
     def start(self, source_id):
         if source_id is None or source_id == "": return False
@@ -40,8 +73,9 @@ class MultiCameraStreamer:
                     logger.error(f"Failed to load image: {source_id}")
                     return False
 
-            # Otherwise treat as video/camera
-            source = int(source_id) if (isinstance(source_id, str) and source_id.isdigit()) else source_id
+            # Otherwise treat as video/camera/stream
+            resolved = self._resolve_stream_url(source_id)
+            source = int(resolved) if (isinstance(resolved, str) and resolved.isdigit()) else resolved
             cap = cv2.VideoCapture(source)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
             

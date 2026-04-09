@@ -5,7 +5,7 @@ import os
 import torch
 import numpy as np
 import tempfile
-from engine import DetectionEngine, get_available_models, download_model_from_url, save_uploaded_model
+from engine import DetectionEngine, get_available_models, download_model_from_url, save_uploaded_model, list_compute_devices
 from streamer import MultiCameraStreamer
 from state_manager import StateManager
 
@@ -109,11 +109,22 @@ with st.sidebar:
     v_mode = st.selectbox("Mode:", ["Live", "Heatmap"], index=0)
     v_qual = st.selectbox("Quality:", ["480p", "720p", "360p"], index=0)
 
+    devices = list_compute_devices()
+    device_ids = [d[0] for d in devices]
+    device_labels = [d[1] for d in devices]
+    device_key = f"slot_device_{slot_id}"
+    if device_key not in st.session_state:
+        st.session_state[device_key] = "auto"
+    device_index = device_ids.index(st.session_state[device_key]) if st.session_state[device_key] in device_ids else 0
+    device_choice_label = st.selectbox("Device", device_labels, index=device_index)
+    device_choice = device_ids[device_labels.index(device_choice_label)]
+
     col_a, col_b = st.columns(2)
     if col_a.button("▶️ Start"):
         if os.path.isdir(src_choice):
             st.error("Папку не можна запускати як live-стрім. Використайте desktop batch-детекцію.")
         else:
+            st.session_state[device_key] = device_choice
             state.update_slot(slot_id, {"src": src_choice, "model": model_choice, "running": True, "mode": v_mode, "quality": v_qual})
             st.success("Запущено")
             st.rerun()
@@ -126,12 +137,17 @@ with st.sidebar:
 st.title("📡 Vision Real-Time Feed")
 
 # Init Engine for Web
-eng_key = f"web_eng_{slot_id}_{cfg['model']}"
+device_choice = st.session_state.get(f"slot_device_{slot_id}", "auto")
+eng_key = f"web_eng_{slot_id}_{cfg['model']}_{device_choice}"
 if eng_key not in st.session_state:
-    st.session_state[eng_key] = DetectionEngine(model_path=None if "Mock" in cfg["model"] else cfg["model"])
+    st.session_state[eng_key] = DetectionEngine(
+        model_path=None if "Mock" in cfg["model"] else cfg["model"],
+        device=device_choice
+    )
 
 engine = st.session_state[eng_key]
 placeholder = st.empty()
+st.caption(f"Device: {engine.device_label}")
 
 # Streaming
 if not cfg.get("running"):

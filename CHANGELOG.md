@@ -6,10 +6,13 @@
 - **ZIP Export:** Збереження оверлеїв (bbox) в архіві `model_name_YYYYMMDD_detected.zip`.
 - **Expanded Sources:** Підтримка папок, розширених форматів відео/зображень у web та desktop.
 - **Model Manager (Web):** Завантаження моделей через URL або upload файлу.
+- **Per-slot Device Selection:** Вибір CPU/GPU для кожного слота та відображення активного пристрою в UI.
+- **Platform Streams:** Підтримка YouTube/платформ через yt-dlp з кешуванням resolved URL.
 
 ### Виправлено
 - **Web Auth:** Відновлено дефолтні користувачі при порожньому `web_users_auth`.
 - **Desktop Grid UX:** Вікна камер створюються лише при активному стрімі.
+- **Device Mismatch:** Моделі примусово ініціалізуються на вибраному девайсі, з fallback на CPU.
 
 ---
 
